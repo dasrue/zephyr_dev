@@ -26,12 +26,12 @@
 		status = "okay";
 
 		led_0: led0 {
-			gpios = <&gpioc 2 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpioc 2 GPIO_ACTIVE_LOW>;
 			label = "Green LED PC2";
 		};
 
 		led_1: led1 {
-			gpios = <&gpioc 3 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpioc 3 GPIO_ACTIVE_LOW>;
 			label = "Blue LED PC3";
 		};
 	};
