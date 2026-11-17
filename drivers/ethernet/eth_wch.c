@@ -16,12 +16,66 @@ LOG_MODULE_REGISTER(ethernet_wch, CONFIG_ETHERNET_LOG_LEVEL);
 #include <zephyr/sys/crc.h>
 #include <ethernet/eth_stats.h>
 
+#include <zephyr/kernel.h>
+#include <zephyr/sys/sys_io.h>
+#include <zephyr/sys/util.h>
+
 #include <hal_ch32fun.h>
+
+/*
+ * The CH32H41x uses ETH_PLL instead of PLL3 on the CH32V30x, a PHY_CFGR 
+ * power/reset register instead of EXTEN_CTR, a single MAC clock gate (HBPCENR)
+ * and HBRSTR instead of AHBRSTR. Use:
+ *
+ *   compatible = "wch,ch32h41x-ethernet", "wch,ethernet";
+ *
+ */
+#define WCH_ETH_IS_H41X DT_NODE_HAS_COMPAT(DT_DRV_INST(0), wch_ch32h41x_ethernet)
 
 #include "eth.h"
 
+#define ETH_MACCR_PR BIT(20)
+
+#if WCH_ETH_IS_H41X
+/* CH32H417RM 31.8.1.20: R32_ETH_PHY_CFGR, in the MAC register block at +0x80 */
+#define WCH_ETH_H41X_PHY_CFGR_OFFSET 0x80
+#define WCH_ETH_H41X_PHY_RSTN        BIT(31) /* 1: normal operation, 0: PHY in reset */
+#define WCH_ETH_H41X_PHY_PD          BIT(30) /* 1: power down (reset value), 0: normal */
+
+/* CH32H417RM 3.4.1: RCC_CTLR ETH_PLL control (fixed 500 MHz, /5 -> 100 MHz to the PHY) */
+#define WCH_ETH_H41X_ETH_PLLON  BIT(26)
+#define WCH_ETH_H41X_ETH_PLLRDY BIT(27)
+
+/* CH32H417RM 3.4.x: ETHMACRST is bit 14 of RCC_HBRSTR. Adjust here if the HAL names differ. */
+#define WCH_ETH_RCC_RSTR  (RCC->HBRSTR)
+#define WCH_ETH_MAC_RST   BIT(14)
+
+/* CH32H417RM 39.2: 96-bit UID, used only if no factory MAC location is defined */
+#define WCH_ETH_H41X_ESIG_UNIID1 0x1FFFF7E8UL
+
+/*
+ * Timing is not specified in the manual: these are conservative, tunable values.
+ */
+#define WCH_ETH_H41X_PLL_TIMEOUT_US 10000U
+#define WCH_ETH_H41X_PHY_RESET_US   1000U
+#define WCH_ETH_H41X_PHY_BOOT_MS    20U
+
+/*
+ * MACCR.PR is documented as the built-in *10M* PHY 50 ohm pull-up. Whether the 10/100 PHY
+ * wants it is unknown; keep the V30x behaviour until tested on hardware.
+ */
+#define WCH_ETH_INTERNAL_PHY_PR 1
+
+// H417 uses a different interrupt
+#define WCH_ETH_DMA_IT_PHYLINK ETH_DMA_IT_PHYSR
+#else
+#define WCH_ETH_DMA_IT_PHYLINK ETH_DMA_IT_PHYLINK
 #define AFIO_PCFR1_MII_RMII_SEL BIT(23)
-#define ETH_MACCR_PR            BIT(20)
+
+#define WCH_ETH_RCC_RSTR        (RCC->AHBRSTR)
+#define WCH_ETH_MAC_RST         RCC_ETHMACRST
+#define WCH_ETH_INTERNAL_PHY_PR 1
+#endif /* WCH_ETH_IS_H41X */
 
 #define ETH_MACCR_FES_10M   ((uint32_t)0x00000000)
 #define ETH_MACCR_FES_100M  ((uint32_t)0x00004000)
@@ -40,16 +94,22 @@ struct eth_wch_config {
 	const struct device *phy_dev;
 
 	const struct device *clk_dev;
+	uint8_t clk_id;
+#if !WCH_ETH_IS_H41X
+	/* The CH32H41x has a single ETH MAC clock gate: no separate TX/RX gates */
 	const struct device *clk_tx_dev;
 	const struct device *clk_rx_dev;
-	uint8_t clk_id;
 	uint8_t clk_tx_id;
 	uint8_t clk_rx_id;
+#endif
 
 	struct net_eth_mac_config mac_cfg;
 	const char *connection_type;
+#if !WCH_ETH_IS_H41X
+	/* The CH32H41x ETH_PLL is fixed: nothing to configure */
 	uint8_t internal_phy_pllmul_idx;
 	uint8_t internal_phy_prediv_idx;
+#endif
 
 	const struct pinctrl_dev_config *pin_cfg;
 	void (*irq_config_func)(const struct device *dev);
@@ -79,8 +139,10 @@ struct eth_dma_desc {
 	uint32_t Buffer2NextDescAddr; /* Buffer2 or next descriptor address pointer */
 };
 
+#if !WCH_ETH_IS_H41X
 #define WCH_PHY_PLL3MUL_VAL(mul) (((mul) << 0x0C) & CFGR2_PLL3MUL)
 #define WCH_PHY_PREDIV2_VAL(mul) (((mul) << 0x04) & CFGR2_PREDIV2)
+#endif
 
 /* NOTE for multiple ETH instances move these to instance macro */
 static struct eth_dma_desc __aligned(4) dma_rx_desc_tab[ETH_RXBUF_NB];
@@ -386,9 +448,9 @@ static void eth_isr(const struct device *dev)
 			k_sem_give(&data->tx_int_sem);
 			eth->DMASR = ETH_DMA_IT_T;
 		}
-		if ((status_flags & ETH_DMA_IT_PHYLINK) != 0U) {
+		if ((status_flags & WCH_ETH_DMA_IT_PHYLINK) != 0U) {
 			/* for compatibility, simply use polling in the MDIO subsystem */
-			eth->DMASR = ETH_DMA_IT_PHYLINK;
+			eth->DMASR = WCH_ETH_DMA_IT_PHYLINK;
 		}
 		eth->DMASR = ETH_DMA_IT_NIS;
 	}
@@ -422,6 +484,32 @@ static int eth_wch_stop(const struct device *dev, struct net_if *iface __unused)
 
 static int get_hw_mac(uint8_t *mac_addr)
 {
+#if WCH_ETH_IS_H41X && !defined(ROM_CFG_USERADR_ID)
+	/*
+	 * The CH32H417 manual says a unique MAC is programmed at the factory but does not give
+	 * its location. Until ROM_CFG_USERADR_ID (or its equivalent) is defined for this part,
+	 * derive a locally administered unicast address from the 96-bit UID.
+	 */
+	uint8_t uid[12];
+	uint32_t crc_a;
+	uint32_t crc_b;
+
+	for (size_t i = 0; i < 3; i++) {
+		sys_put_le32(sys_read32(WCH_ETH_H41X_ESIG_UNIID1 + (i * 4U)), &uid[i * 4U]);
+	}
+
+	crc_a = crc32_ieee(uid, sizeof(uid));
+	crc_b = crc32_ieee(uid, 8);
+
+	mac_addr[0] = 0x02; /* locally administered, unicast */
+	mac_addr[1] = (crc_a >> 24) & 0xFF;
+	mac_addr[2] = (crc_a >> 16) & 0xFF;
+	mac_addr[3] = (crc_a >> 8) & 0xFF;
+	mac_addr[4] = crc_a & 0xFF;
+	mac_addr[5] = crc_b & 0xFF;
+
+	return 0;
+#else
 	uint8_t *mac_base = (uint8_t *)(ROM_CFG_USERADR_ID);
 
 	for (size_t i = 0; i < NET_ETH_ADDR_LEN; i++) {
@@ -429,6 +517,7 @@ static int get_hw_mac(uint8_t *mac_addr)
 	}
 
 	return 0;
+#endif
 }
 
 static void set_mac_config(const struct device *dev, struct phy_link_state *state)
@@ -505,8 +594,10 @@ static int eth_mac_init(const struct device *dev)
 		(ETH_DMA_IT_NIS | ETH_DMA_IT_R | ETH_DMA_IT_T | ETH_DMA_IT_AIS | ETH_DMA_IT_RBU);
 
 	if (strcmp(config->connection_type, "internal") == 0) {
+#if WCH_ETH_INTERNAL_PHY_PR
 		eth->MACCR |= ETH_MACCR_PR;
-		eth->DMAIER |= ETH_DMA_IT_PHYLINK;
+#endif
+		eth->DMAIER |= WCH_ETH_DMA_IT_PHYLINK;
 	}
 
 	init_tx_dma_desc(eth);
@@ -620,28 +711,79 @@ static struct net_stats_eth *eth_wch_get_stats(const struct device *dev,
 }
 #endif /* CONFIG_NET_STATISTICS_ETHERNET */
 
+#if WCH_ETH_IS_H41X
+/*
+ * Start the dedicated ETH_PLL (500 MHz from the 25 MHz HSE, /5 -> 100 MHz to the internal
+ * PHY). It is independent of SYSCLK and has no multiplier/divider to program.
+ */
+static int eth_wch_h41x_eth_pll_on(void)
+{
+	if ((RCC->CTLR & RCC_HSERDY) == 0U) {
+		LOG_WRN("HSE not running: ETH_PLL is fed from the 25 MHz HSE");
+	}
+
+	RCC->CTLR |= WCH_ETH_H41X_ETH_PLLON;
+
+	if (!WAIT_FOR((RCC->CTLR & WCH_ETH_H41X_ETH_PLLRDY) != 0U, WCH_ETH_H41X_PLL_TIMEOUT_US,
+			 k_busy_wait(10))) {
+		LOG_ERR("ETH_PLL failed to lock");
+		return -ETIMEDOUT;
+	}
+
+	return 0;
+}
+
+/*
+ * PHY_CFGR resets to PHY_RSTN = 0 (in reset) and PHY_PD = 1 (powered down), so the PHY must be
+ * released explicitly. Done after the MAC reset, as PHY_CFGR lives in the MAC register block.
+ */
+static void eth_wch_h41x_phy_power_up(const struct eth_wch_config *config)
+{
+	mm_reg_t reg = (mm_reg_t)config->regs + WCH_ETH_H41X_PHY_CFGR_OFFSET;
+	uint32_t val = sys_read32(reg);
+
+	/* Power up while still held in reset ... */
+	val &= ~(WCH_ETH_H41X_PHY_PD | WCH_ETH_H41X_PHY_RSTN);
+	sys_write32(val, reg);
+	k_busy_wait(WCH_ETH_H41X_PHY_RESET_US);
+
+	/* ... then release reset */
+	sys_write32(val | WCH_ETH_H41X_PHY_RSTN, reg);
+	k_msleep(WCH_ETH_H41X_PHY_BOOT_MS);
+}
+#endif /* WCH_ETH_IS_H41X */
+
 static int eth_wch_init(const struct device *dev)
 {
 	struct eth_wch_data *data = dev->data;
 	const struct eth_wch_config *config = dev->config;
 	clock_control_subsys_t clock_sys;
+	bool internal_phy = (strcmp(config->connection_type, "internal") == 0);
 
 	int ret;
 
 	/* enable clocks */
 	clock_sys = (clock_control_subsys_t *)(uintptr_t)config->clk_id;
 	ret = clock_control_on(config->clk_dev, clock_sys);
+#if !WCH_ETH_IS_H41X
 	clock_sys = (clock_control_subsys_t *)(uintptr_t)config->clk_tx_id;
 	ret |= clock_control_on(config->clk_tx_dev, clock_sys);
 	clock_sys = (clock_control_subsys_t *)(uintptr_t)config->clk_rx_id;
 	ret |= clock_control_on(config->clk_rx_dev, clock_sys);
+#endif
 
 	if (ret < 0) {
 		LOG_ERR("Failed to enable ethernet clocks");
 		return -EIO;
 	}
 
-	if (strcmp(config->connection_type, "internal") == 0) {
+	if (internal_phy) {
+#if WCH_ETH_IS_H41X
+		ret = eth_wch_h41x_eth_pll_on();
+		if (ret < 0) {
+			return ret;
+		}
+#else
 		/* NOTE: Internal PHY is clocked by separate PLL3, independently of SYSCLK */
 
 		RCC->CTLR &= ~RCC_PLL3ON;
@@ -655,16 +797,26 @@ static int eth_wch_init(const struct device *dev)
 		}
 
 		EXTEN->EXTEN_CTR |= EXTEN_ETH_10M_EN;
-	} else if (strcmp(config->connection_type, "rmii") == 0) {
+#endif
+	}
+#if !WCH_ETH_IS_H41X
+	else if (strcmp(config->connection_type, "rmii") == 0) {
 		AFIO->PCFR1 |= AFIO_PCFR1_MII_RMII_SEL;
 	} else if (strcmp(config->connection_type, "rgmii") == 0) {
 		AFIO->PCFR1 |= AFIO_PCFR1_MII_RMII_SEL;
 		EXTEN->EXTEN_CTR |= EXTEN_ETH_RGMII_SEL;
 	}
+#endif
 
 	/* Software Reset of MAC peripherals */
-	RCC->AHBRSTR |= RCC_ETHMACRST;
-	RCC->AHBRSTR &= ~RCC_ETHMACRST;
+	WCH_ETH_RCC_RSTR |= WCH_ETH_MAC_RST;
+	WCH_ETH_RCC_RSTR &= ~WCH_ETH_MAC_RST;
+
+#if WCH_ETH_IS_H41X
+	if (internal_phy) {
+		eth_wch_h41x_phy_power_up(config);
+	}
+#endif
 
 	/* configure pinmux */
 	ret = pinctrl_apply_state(config->pin_cfg, PINCTRL_STATE_DEFAULT);
@@ -710,18 +862,38 @@ static DEVICE_API(ethernet, eth_api) = {
 #define ETH_WCH_IRQ_HANDLER(idx)                                                                   \
 	static void eth_wch_irq_config_func_##idx(const struct device *dev)                        \
 	{                                                                                          \
-		/* IRQ 0 is core Interrupt (IRQ 1 is wakeup) */                                    \
+		/* IRQ number comes from devicetree */                                             \
 		IRQ_CONNECT(DT_INST_IRQN(idx), DT_INST_IRQ(idx, priority), eth_isr,                \
 			    DEVICE_DT_INST_GET(idx), 0);                                           \
 		irq_enable(DT_INST_IRQN(idx));                                                     \
 	}
 
-#define ETH_WCH_DEVICE(inst)                                                                       \
+#if WCH_ETH_IS_H41X
+/* The CH32H41x has one MAC clock gate and a fixed ETH_PLL. MII/RMII/RGMII are not wired up yet. */
+#define ETH_WCH_ASSERT_PHY_TYPE(inst)                                                              \
+	BUILD_ASSERT(DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, internal),                  \
+			"CH32H41x: only the internal PHY is supported");
+#define ETH_WCH_CLK_EXTRA_INIT(inst)
+#define ETH_WCH_PHY_PLL_INIT(inst)
+#else
+#define ETH_WCH_ASSERT_PHY_TYPE(inst)                                                              \
 	BUILD_ASSERT(DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, mii) ||                     \
-			     DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, rmii) ||            \
-			     DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, rgmii) ||           \
-			     DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, internal),          \
-		     "Unsupported PHY connection type");                                           \
+			DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, rmii) ||                 \
+			DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, rgmii) ||                \
+			DT_INST_ENUM_HAS_VALUE(inst, phy_connection_type, internal),               \
+		     "Unsupported PHY connection type");
+#define ETH_WCH_CLK_EXTRA_INIT(inst)                                                               \
+	.clk_tx_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR_BY_NAME(inst, tx)),                        \
+	.clk_tx_id = DT_INST_CLOCKS_CELL_BY_NAME(inst, tx, id),                                    \
+	.clk_rx_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR_BY_NAME(inst, rx)),                        \
+	.clk_rx_id = DT_INST_CLOCKS_CELL_BY_NAME(inst, rx, id),
+#define ETH_WCH_PHY_PLL_INIT(inst)                                                                 \
+	.internal_phy_pllmul_idx = DT_INST_ENUM_IDX(inst, internal_phy_pllmul),                    \
+	.internal_phy_prediv_idx = DT_INST_ENUM_IDX(inst, internal_phy_prediv),
+#endif /* WCH_ETH_IS_H41X */
+
+#define ETH_WCH_DEVICE(inst)                                                                       \
+	ETH_WCH_ASSERT_PHY_TYPE(inst)                                                              \
 	PINCTRL_DT_INST_DEFINE(inst);                                                              \
 	ETH_WCH_IRQ_HANDLER_DECL(inst)                                                             \
 	static const struct eth_wch_config eth_wch_config_##inst = {                               \
@@ -729,20 +901,16 @@ static DEVICE_API(ethernet, eth_api) = {
 		.phy_dev = DEVICE_DT_GET(DT_INST_PHANDLE(inst, phy_handle)),                       \
 		.clk_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR_BY_NAME(inst, mac)),                  \
 		.clk_id = DT_INST_CLOCKS_CELL_BY_NAME(inst, mac, id),                              \
-		.clk_tx_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR_BY_NAME(inst, tx)),                \
-		.clk_tx_id = DT_INST_CLOCKS_CELL_BY_NAME(inst, tx, id),                            \
-		.clk_rx_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR_BY_NAME(inst, rx)),                \
-		.clk_rx_id = DT_INST_CLOCKS_CELL_BY_NAME(inst, rx, id),                            \
+		ETH_WCH_CLK_EXTRA_INIT(inst)                                                       \
 		.mac_cfg = NET_ETH_MAC_DT_INST_CONFIG_INIT(inst),                                  \
 		.connection_type = DT_INST_PROP(inst, phy_connection_type),                        \
-		.internal_phy_pllmul_idx = DT_INST_ENUM_IDX(inst, internal_phy_pllmul),            \
-		.internal_phy_prediv_idx = DT_INST_ENUM_IDX(inst, internal_phy_prediv),            \
+		ETH_WCH_PHY_PLL_INIT(inst)                                                         \
 		.pin_cfg = PINCTRL_DT_INST_DEV_CONFIG_GET(inst),                                   \
 		ETH_WCH_IRQ_HANDLER_FUNC(inst)};                                                   \
 	static struct eth_wch_data eth_wch_data_##inst;                                            \
 	ETH_NET_DEVICE_DT_INST_DEFINE(inst, eth_wch_init, NULL, &eth_wch_data_##inst,              \
-				      &eth_wch_config_##inst, CONFIG_ETH_INIT_PRIORITY, &eth_api,  \
-				      NET_ETH_MTU);                                                \
+			      &eth_wch_config_##inst, CONFIG_ETH_INIT_PRIORITY, &eth_api,          \
+			      NET_ETH_MTU);                                                        \
 	ETH_WCH_IRQ_HANDLER(inst)
 
 DT_INST_FOREACH_STATUS_OKAY(ETH_WCH_DEVICE)

@@ -109,5 +109,22 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 		};
+
+		eth: mac: ethernet@40028000 {
+			compatible = "wch,ch32h41x-ethernet", "wch,ethernet";
+			reg = <0x40028000 0x2000>;
+			clocks = <&rcc CH32V20X_V30X_CLOCK_ETHMAC>;
+			clock-names = "mac";
+			interrupt-parent = <&pfic>;
+			interrupts = <110>, <111>;
+			status = "disabled";
+
+			mdio: mdio {
+				compatible = "snps,dwmac-mdio";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
+			};
+		};
 	};
 };
