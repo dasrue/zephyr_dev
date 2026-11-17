@@ -54,6 +54,16 @@ Boards
   * Remove custom nodes and linker sections that reserve the push area, such as
     ``nrf_kmu_reserved_push_area``. They would overlap the ``kmu_push_area`` node.
 
+* On Nordic SoCs, :kconfig:option:`CONFIG_TRUSTED_EXECUTION_NONSECURE` no longer enables
+  :kconfig:option:`CONFIG_BUILD_WITH_TFM` by default, as TF-M is not the only possible secure
+  firmware. The in-tree ``/ns`` board targets now enable TF-M themselves. Out-of-tree non-secure
+  board targets that use TF-M must do the same, in their :file:`Kconfig.defconfig`:
+
+  .. code-block:: kconfig
+
+     configdefault BUILD_WITH_TFM
+             default y if BOARD_MY_BOARD_NRF9160_NS
+
 * :zephyr:board:`stm32_min_dev` now declares two SoCs, so the SoC qualifier is
   mandatory. Applications and test configurations that used ``stm32_min_dev``,
   ``stm32_min_dev@blue`` or ``stm32_min_dev@black`` must use
@@ -228,6 +238,10 @@ Ethernet
   on every Ethernet interface when :kconfig:option:`CONFIG_NET_LLDP` is set. Out-of-tree Ethernet
   drivers must stop reporting it. (:github:`124787`)
 
+* The ``ETHERNET_DSA_USER_PORT`` and ``ETHERNET_DSA_CONDUIT_PORT`` values of
+  :c:enum:`ethernet_hw_caps` have been removed. Use :c:func:`net_eth_get_dsa_port_type` to get the
+  DSA port type of an interface instead. (:github:`124790`)
+
 I2S
 ===
 
@@ -236,6 +250,15 @@ I2S
   :kconfig:option:`CONFIG_I2S_NATIVE_SIM_RX_PATH` and
   :kconfig:option:`CONFIG_I2S_NATIVE_SIM_TX_PATH`, which also accept ALSA devices. Without the
   ALSA backend the old options still provide their default. (:github:`123474`)
+
+MFD
+===
+
+* nPM13xx event callbacks now use :c:struct:`mfd_npm13xx_event_callback` instead of
+  :c:struct:`gpio_callback`. Set its ``handler`` and ``event_mask`` fields directly instead of
+  calling ``gpio_init_callback()``. The handler takes a pointer to the new callback structure
+  and an ``npm13xx_event_t`` event mask; existing ``BIT(NPM13XX_EVENT_*)`` masks are unchanged.
+  (:github:`123060`)
 
 Modem
 =====
@@ -280,6 +303,19 @@ PCIe
   :c:func:`pcie_msi_enable` return false without writing the configuration space or enabling bus
   mastering; dependent drivers such as NVMe, ivshmem and IGC fail to initialize. This is
   intentional: use a 64-bit MSI capability or a target address below 4 GiB. (:github:`124156`)
+
+Power Management
+================
+
+* NXP MCX :dtcompatible:`nxp,spc` ``wakeup-delay`` specifies regulator-settling delay in
+  SPC timer cycles. At the nominal 10 MHz timer frequency, every additional 100 cycles
+  adds approximately 10 us to wake-up time. A nonzero programmed delay can also apply
+  when ``LP_CFG`` and ``ACTIVE_CFG`` select the same voltage.
+  SoC power-state ``exit-latency-us`` defaults include SPC settling and mode-specific
+  recovery allowances. Board/application overlays can select counts for their regulator,
+  voltages, output capacitance and external power circuitry. Measure the total wake-up
+  time for the actual project, including clock recovery and resume processing, and adjust
+  ``exit-latency-us`` accordingly; these defaults are not measured worst-case bounds.
 
 PTP Clock
 =========
@@ -329,6 +365,27 @@ Timers
   ``z_cms_lptim_hook_on_lpm_entry`` and ``z_cms_lptim_hook_on_lpm_exit`` with
   :c:func:`z_sys_clock_lpm_enter` and :c:func:`z_sys_clock_lpm_exit`, respectively. (:github:`124238`).
 
+Wi-Fi
+=====
+
+* :kconfig:option:`CONFIG_ESP32_WIFI_STA_RECONNECT` now only applies to an Espressif station
+  that loses an established connection. It reconnects with a growing backoff until it succeeds
+  or the application disconnects. While it reconnects, connection requests fail with
+  ``-EALREADY``. The option no longer changes how connection requests made by the application
+  are handled.
+
+* :kconfig:option:`CONFIG_ESP32_WIFI_STA_RECONNECT` is now enabled by default, so an Espressif
+  station that loses an established connection reconnects on its own. Set the option to ``n`` to
+  keep the station disconnected instead.
+
+* Espressif Wi-Fi connection requests now retry authentication and association failures, such as
+  an access point that rejects the first attempt after the station was reset, instead of failing
+  on the first rejection. A request that leaves the ``timeout`` field of
+  :c:struct:`wifi_connect_req_params` at 0 fails after three short retries. A request with a
+  timeout retries until it expires and then reports a connection timeout, and one with
+  ``SYS_FOREVER_MS`` retries until the application disconnects. A wrong WPA3-SAE password cannot
+  be told apart from such a rejection, so it is retried as well.
+
 .. zephyr-keep-sorted-stop
 
 Bluetooth
@@ -338,6 +395,12 @@ Bluetooth Audio
 ===============
 
 .. zephyr-keep-sorted-start re(^\* \w)
+
+* BAP
+
+  * ``CONFIG_BT_BAP_UNICAST_CLIENT_GROUP_STREAM_COUNT`` has been renamed to
+    :kconfig:option:`CONFIG_BT_BAP_UNICAST_CLIENT_GROUP_CIS_COUNT`. All applications must apply a
+    search and replace on this.
 
 * MCP
 
