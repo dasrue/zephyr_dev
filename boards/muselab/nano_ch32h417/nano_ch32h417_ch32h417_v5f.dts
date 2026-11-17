@@ -1,0 +1,88 @@
+/*
+ * Copyright (c) 2026 Liu Changjie
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <wch/ch32h417/ch32h417_v5f.dtsi>
+#include "nano_ch32h417-pinctrl.dtsi"
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	compatible = "wch,ch32h417";
+	model = "Muselab nanoCH32H417";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		status = "okay";
+
+		led_0: led0 {
+			gpios = <&gpioc 2 GPIO_ACTIVE_HIGH>;
+			label = "Green LED PC2";
+		};
+
+		led_1: led1 {
+			gpios = <&gpioc 3 GPIO_ACTIVE_HIGH>;
+			label = "Blue LED PC3";
+		};
+	};
+
+	aliases {
+		led0 = &led_0;
+		led1 = &led_1;
+	};
+};
+
+&gpioa {
+	status = "okay";
+};
+
+&gpiob {
+	status = "okay";
+};
+
+&gpioc {
+	status = "okay";
+};
+
+&gpiod {
+	status = "okay";
+};
+
+&gpioe {
+	status = "okay";
+};
+
+&gpiof {
+	status = "okay";
+};
+
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(25)>;
+	status = "okay";
+};
+
+&pll {
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+};
+
+&usart1 {
+	current-speed = <115200>;
+	pinctrl-0 = <&usart1_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};

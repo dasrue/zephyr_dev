@@ -1,0 +1,18 @@
+/*
+ * Copyright (c) 2026 Liu Changjie
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pinctrl/ch32h41x-pinctrl.h>
+
+&pinctrl {
+	usart1_default: usart1_default {
+		group1 {
+			pinmux = <USART1_TX_PA9_AF7>;
+			output-high;
+			drive-push-pull;
+			slew-rate = "max-speed-180mhz";
+		};
+	};
+};
