@@ -13,3 +13,10 @@ configdefault ISR_STACK_SIZE
 	default 512
 
 endif # BOARD_NANO_CH32H417_CH32H417_V3F
+
+if BOARD_NANO_CH32H417_CH32H417_V5F
+
+configdefault ETH_DRIVER
+	default y
+	
+endif # BOARD_NANO_CH32H417_CH32H417_V5F

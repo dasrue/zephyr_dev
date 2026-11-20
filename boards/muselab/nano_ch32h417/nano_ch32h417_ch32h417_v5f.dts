@@ -86,3 +86,22 @@
 	pinctrl-names = "default";
 	status = "okay";
 };
+
+&mac {
+	pinctrl-0 = <&mac_default>;
+	pinctrl-names = "default";
+	phy-connection-type = "internal";
+	phy-handle = <&eth_phy>;
+	status = "okay";
+};
+
+&mdio {
+	pinctrl-0 = <&mdio_default>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	eth_phy: ethernet-phy@1 {
+		compatible = "ethernet-phy";
+		reg = <1>;
+	};
+};
