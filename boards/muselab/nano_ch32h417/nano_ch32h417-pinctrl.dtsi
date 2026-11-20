@@ -14,6 +14,9 @@
 			drive-push-pull;
 			slew-rate = "max-speed-180mhz";
 		};
+		group2 {
+			pinmux = <USART1_RX_PA10_AF7>;
+		};
 	};
 	mac_default: mac_default {
 		/* No pinmux required for internal PHY on the H417 */
